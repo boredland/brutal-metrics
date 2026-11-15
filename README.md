@@ -11,11 +11,10 @@ use (Codex), and how full its context window is. No financial cost is shown.
 - **Summary box** at the top of the panel, in compact cells (value over label):
   - the tokens of the space, with **SESSION**, **LAST TURN** and **COST** tabs, and the account each session
     runs as;
-  - `AGENTS` and `PLUGINS` counts, big, beside the token count;
-  - `CACHE` (cache reads as a share of all input
+  - `AGENTS` and `CACHE` (cache reads as a share of all input
     tokens), all summed over the space;
   - `CTX MAX`, the fullest context window among the agents (tinted from 80%);
-  - `MCP` and `HOOKS`, the configured items across the agents.
+  - `PLUGINS`, `MCP` and `HOOKS`, the configured items across the agents.
 - **One card per agent**, with sub-agents nested under it:
   - a `CLAUDE` or `CODEX` tag;
   - a thin 24-segment context bar split into base (system prompt, tools,
@@ -80,7 +79,7 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
     and a new prompt starts the count from zero.
   - Total is the whole session.
 - `CTX MAX` is the context size at the last turn.
-- `PLUGINS` (top), `MCP` and `HOOKS` count what is configured, not what is
+- `PLUGINS`, `MCP` and `HOOKS` count what is configured, not what is
   connected. They are read from the settings files, `.claude.json`,
   `.mcp.json` and the enabled plugins. claude.ai cloud connectors are not
   counted.

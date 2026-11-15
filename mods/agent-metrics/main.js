@@ -166,20 +166,21 @@ export default class AgentMetrics extends View {
           .tooltip(this.auto ? "Pause: stop cycling the tabs" : `Play: cycle SESSION, LAST TURN and COST every ${AUTO_MS / 1000}s`)
           .on_click((_e, cx) => { cx.stop_propagation(); this.auto = !this.auto; this.autoAt = Date.now(); cx.notify(); })
           .child(svg(this.auto ? "mods/agent-metrics/pause.svg" : "mods/agent-metrics/play.svg").size(10))))
-      // Headline row: tokens, with the agent and plugin counts big beside it.
-      .child(h_flex().items_stretch()
-        .child(v_flex().id("tokens-total").flex_1().min_w(0).px(10).justify_center()
+      // Headline: the one big figure (tokens, or cost in the COST tab), centered, never cut: it shrinks with its length.
+      .child((() => {
+        const txt = loading ? "…" : this.view === "cost" ? moneyOf(totalUsd, totalEst) : fmt(totalTok);
+        const size = txt.length <= 5 ? 42 : txt.length <= 7 ? 34 : txt.length <= 9 ? 28 : 22;
+        return v_flex().id("tokens-total").w_full().px(10).py(2).items_center().justify_center()
           .tooltip(this.view === "cost" ? costTip(totalEst) : "Tokens (input + output + cache writes) of the selected view")
-          .child(div().text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(loading ? "…" : this.view === "cost" ? moneyOf(totalUsd, totalEst) : fmt(totalTok)))
-          .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(this.view === "cost" ? "EST. COST" : "TOKENS")))
-        .children([[rows.length, "AGENTS"], [loading ? "…" : cfg.plugins, "PLUGINS"]].map(([n, label]) =>
-          v_flex().id(`head-${label}`).flex_none().w(66).items_center().justify_center().py(4)
-            .child(div().text_size(30).font_family(MONO).font_black().text_color(fg).child(String(n)))
-            .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label)))))
+          .child(div().text_size(size).font_family(MONO).font_black().text_color(fg).child(txt))
+          .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(this.view === "cost" ? "EST. COST" : "TOKENS"));
+      })())
       .child(h_flex().border_t(2).border_color(fg)
+        .child(cell(String(rows.length), "AGENTS"))
         .child(cell(loading ? "…" : `${cachePct}%`, "CACHE"))
         .child(cell(loading ? "…" : `${Math.round(ctxPct * 100)}%`, "CTX MAX", true, !loading && ctxPct >= HIGH)))
       .child(h_flex().border_t(2).border_color(fg)
+        .child(cell(loading ? "…" : String(cfg.plugins), "PLUGINS"))
         .child(cell(loading ? "…" : String(cfg.mcp), "MCP"))
         .child(cell(loading ? "…" : String(cfg.hooks), "HOOKS", true)))
       .child(h_flex().border_t(2).border_color(fg).px(10).py(5).gap(8).items_start()
