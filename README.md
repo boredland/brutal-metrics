@@ -56,6 +56,18 @@ To install it by hand:
 
 Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
+## Scope, loading and errors
+
+- A **SCOPE** row under the tabs picks the agents shown: **SPACE** (the shown space, the
+  default), **PROJECT** (every agent, in any space, whose folder is the focused terminal's)
+  or **ALL**.
+- Nothing reads zero until the collector has answered once: the numbers show `…`, cards say
+  `READING…`, and an empty list shows pulsing placeholders. If a read fails, the last data
+  stays and a red bar says `STALE · READ FAILED: …` with a **RETRY** button; the next
+  refresh (5 s) retries by itself.
+- The side panel is remembered per space; a space that never had a choice starts with the
+  last one made anywhere, instead of closed.
+
 ## What the numbers mean
 
 - Two tabs at the top of the box switch the numbers: **SESSION** (the
@@ -138,3 +150,10 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 See [RECIPE.md](RECIPE.md) for the full spec, which an agent can use to
 rebuild the layout from scratch.
+
+## Tests
+
+`node --test tests/model.test.mjs` covers `mods/agent-metrics/model.js` (the pure logic: formatting,
+window, cost, turns left, pairing terminals with sessions). `node scripts/test-cost.mjs` checks the cost
+math against Claude Code's `/usage` and the collector's cache-write split. Check a mod with
+`herdr-app check <mod folder>`; `node --check` misses QuickJS-only errors.

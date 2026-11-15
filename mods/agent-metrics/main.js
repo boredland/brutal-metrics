@@ -4,95 +4,17 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { avatar, animated } from "./avatar.js";
-import { spaces, agents, terminals, panes, exec, hc, appHome, home, window, theme, run, shared, setShared, settings } from "herdr";
+import { HIGH, winOf, kindOfApp, isCodex, fmt, moneyOf, costTip, costOf, acctName, acctKey, turnOf, wslPath, turnsLeft, age, normPath, matchSessions } from "./model.js";
+import { spaces, agents, terminals, panes, focused, exec, hc, appHome, home, window, theme, run, shared, setShared, settings } from "herdr";
 
 // Feed for the Flow tab (agent-flow): the collector's message events, `to` resolved here by match().
 const FLOW_KEY = "flow.events", FLOW_HEARTBEAT_MS = 15000;
 
 const DISTRO = "Ubuntu";
 const REFRESH_MS = 5000;
-// Anthropic API list prices, USD per million tokens: [input, output, cache read, cache write 5m, cache write 1h].
-// Source: platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-12). Keyed by model id without a
-// date suffix; "@long" is a request over the model's long-prompt size (the collector tags those).
-const PRICES = {
-  "claude-fable-5-2": [8, 40, 0.2, 10, 16],
-  "claude-mythos-5-2": [8, 40, 0.2, 10, 16],
-  "claude-fable-5-1": [10, 50, 0.25, 12.5, 20],
-  "claude-mythos-5-1": [10, 50, 0.25, 12.5, 20],
-  "claude-fable-5": [10, 50, 1, 12.5, 20],
-  "claude-mythos-5": [10, 50, 1, 12.5, 20],
-  "claude-opus-5-5": [4, 20, 0.2, 5, 8],
-  "claude-opus-5": [5, 25, 0.5, 6.25, 10],
-  "claude-opus-4-8": [5, 25, 0.5, 6.25, 10],
-  "claude-opus-4-7": [5, 25, 0.5, 6.25, 10],
-  "claude-opus-4-6": [5, 25, 0.5, 6.25, 10],
-  "claude-opus-4-5": [5, 25, 0.5, 6.25, 10],
-  "claude-opus-4-1": [15, 75, 1.5, 18.75, 30],
-  "claude-opus-4": [15, 75, 1.5, 18.75, 30],
-  "claude-sonnet-5-5": [2, 10, 0.1, 2.5, 4],
-  "claude-sonnet-5": [2, 10, 0.2, 2.5, 4],
-  "claude-sonnet-4-6": [3, 15, 0.3, 3.75, 6],
-  "claude-sonnet-4-5": [3, 15, 0.3, 3.75, 6],
-  "claude-sonnet-4": [3, 15, 0.3, 3.75, 6],
-  "claude-haiku-5-5": [0.1, 0.5, 0.01, 0.125, 0.2],
-  "claude-haiku-5-5@long": [0.5, 2.5, 0.05, 0.625, 1],
-  "claude-haiku-4-5": [1, 5, 0.1, 1.25, 2],
-};
-// A model not in the table: priced by its family's current model, and the cost is shown as an estimate (~).
-const FAMILY = [[/fable|mythos/, "claude-fable-5-2"], [/opus/, "claude-opus-5-5"], [/haiku/, "claude-haiku-5-5"], [/./, "claude-sonnet-5-5"]];
-const COST_TIP = "API-equivalent cost at Anthropic list prices, not what a subscription is billed";
-const WARN = 0.6, HIGH = 0.8;
-// Context window: Claude Code reports no limit, so infer it (over 200k means the 1M window).
-const windowOf = (ctx) => (ctx > 200_000 ? 1_000_000 : 200_000);
-// A session's window: Codex reports its own; Claude's is inferred from the context size.
-const winOf = (s) => s?.window || windowOf(s?.ctx ?? 0);
-// Which agent a session or a terminal is: "claude", "codex", or null when the terminal doesn't say.
-const kindOfApp = (app) => (/codex/i.test(app ?? "") ? "codex" : /claude/i.test(app ?? "") ? "claude" : null);
-const isCodex = (s) => s?.agent === "codex";
-
-const fmt = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n));
-
-const money = (x) => (x >= 100 ? "$" + Math.round(x) : x >= 10 ? "$" + x.toFixed(1) : "$" + x.toFixed(2));
-
-// Account of a session as the collector resolved it: login email, or the credential kind (API KEY, BEDROCK...).
-const acctName = (a) => (a ? (a.kind === "login" ? a.email : a.label) : null);
-const acctKey = (a) => acctName(a) ?? "?";
-
-// Usage of the current turn (everything since the person's last prompt), in the same shape as a session.
-function turnOf(s) {
-  const t = s?.turn;
-  return t ? { in: t.in, out: t.out, cache_read: t.cr, cache_write: t.cw, by_model: t.by } : s;
-}
-
-// Price row of a collector model key: exact id, then the id without a date suffix (-20251001), else null.
-function priceOf(key) {
-  const [id, tier] = key.split("@"), base = id.replace(/-\d{8}$/, ""), sfx = tier ? "@" + tier : "";
-  return PRICES[id + sfx] ?? PRICES[base + sfx] ?? PRICES[base] ?? null;
-}
-
-// USD of a by-model usage map ({model: [in, out, cache read, write 5m, write 1h]}; an older 4-long row's write
-// counts as 5m). `estimated` is true when some model with usage had no price of its own.
-function costOf(by) {
-  let usd = 0, estimated = false;
-  for (const [key, [i = 0, o = 0, cr = 0, w5 = 0, w1 = 0]] of Object.entries(by ?? {})) {
-    let p = priceOf(key);
-    if (!p) {
-      p = PRICES[FAMILY.find(([re]) => re.test(key))[1]];
-      if (i || o || cr || w5 || w1) estimated = true;
-    }
-    usd += (i * p[0] + o * p[1] + cr * p[2] + w5 * p[3] + w1 * p[4]) / 1e6;
-  }
-  return { usd, estimated };
-}
-const moneyOf = (usd, estimated) => (estimated ? "~" : "") + money(usd);
-const costTip = (estimated) => COST_TIP + (estimated ? ". Estimated: a model here has no list price in the table, so its family's price is used" : "");
-
-// A Windows path as WSL sees it (C:\Users\you -> /mnt/c/Users/you); other paths unchanged.
-function wslPath(p) {
-  const u = p.replaceAll("\\", "/"), m = u.match(/^([A-Za-z]):\/(.*)$/);
-  return m ? `/mnt/${m[1].toLowerCase()}/${m[2]}` : u;
-}
-const STUCK_MS = 60000; // a collector run older than this is treated as hung
+// Herdr stops an exec after 30s unless told otherwise, and a first read of many long transcripts can pass that.
+const COLLECT_MS = 120000;
+const STUCK_MS = COLLECT_MS + 15000; // a collector run older than this is treated as hung
 const scriptPath = () => wslPath(appHome()) + "/mods/agent-metrics/collect.py";
 
 // Low-poly rainbow border for a working agent's card: flat rainbow facets, alternately lit and shaded,
@@ -123,6 +45,7 @@ export default class AgentMetrics extends View {
     this.width = 300;
     this.busy = false;
     this.tick = 0; this.anim = false;
+    this.scope = "space"; // which agents: "space" (the shown one), "project" (the focused folder, any space), "all"
     this.view = "total"; // "total" = whole session (default), "turn" = last turn, "cost" = session cost
     // Avatars step through their poses only while some agent is active (each tick redraws the window).
     cx.timer.every(200, (cx) => { if (this.anim) { this.tick++; cx.notify(); } });
@@ -148,8 +71,8 @@ export default class AgentMetrics extends View {
         }
         const win = window()?.platform === "windows";
         const r = await within(win
-          ? exec("wsl.exe", ["-d", DISTRO, "python3", scriptPath(), wslPath(home()) + "/.claude"])
-          : exec("python3", [scriptPath(), home() + "/.claude"]), 40000);
+          ? exec("wsl.exe", ["-d", DISTRO, "python3", scriptPath(), wslPath(home()) + "/.claude"], { timeout: COLLECT_MS })
+          : exec("python3", [scriptPath(), home() + "/.claude"], { timeout: COLLECT_MS }), COLLECT_MS + 5000);
         if (run !== this.run) return;
         if (r.code !== 0) throw new Error((r.stderr || "collector failed").split("\n").slice(-2).join(" "));
         this.data = JSON.parse(r.stdout);
@@ -188,57 +111,19 @@ export default class AgentMetrics extends View {
     setShared(FLOW_KEY, { ok: true, at: this.flowAt, orchestrator: null, events });
   }
 
-  // terminal address -> collector session.
-  // 1) the session that started just after the terminal was created (agent launched as the terminal's program);
-  // 2) else the newest session running in the same folder (claude typed into a shell).
+  // terminal address -> collector session (the rules live in model.js: matchSessions).
   match(list) {
-    const out = {}, used = new Set(), sessions = this.data?.sessions ?? [];
-    // 0) Same title: Claude Code sets the terminal title to its session title (ai-title, or the /rename),
-    // which survives restarts and resumes, when terminal creation times say nothing. Sub-agents first, so
-    // a parent whose title went stale and matches a sub-agent's falls through to the rules below.
-    const clean = (x) => (x ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim().toLowerCase();
+    const cwds = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
+    const kinds = Object.fromEntries([...panes(), ...agents()].filter((x) => x.app).map((x) => [x.terminal ?? x.address, kindOfApp(x.app)]));
     const titleOf = (addr) => agents().find((a) => a.address === addr)?.title
       || panes().find((p) => p.terminal === addr)?.title
       || terminals().find((x) => x.address === addr)?.title;
-    const norm = (p) => (p ?? "").replaceAll("\\", "/").replace(/^\/\/wsl[.]localhost\/[^/]+/i, "").replace(/\/+$/, "").toLowerCase();
-    const cwds = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
-    const folderOf = (addr) => norm(cwds[addr] ?? terminals().find((x) => x.address === addr)?.cwd);
-    // A Claude session never goes to a Codex terminal, nor the reverse; a terminal that reports no app takes either.
-    const kinds = Object.fromEntries([...panes(), ...agents()].filter((x) => x.app).map((x) => [x.terminal ?? x.address, kindOfApp(x.app)]));
-    const fits = (addr, s) => !kinds[addr] || kinds[addr] === (s.agent ?? "claude");
-    // Codex titles its terminal "<thread name> | <folder>"; Claude Code uses the session title as is.
-    const sameTitle = (term, sess) => Boolean(sess) && (term === sess || term.startsWith(sess + " | "));
-    // Two sessions can share a title (two agents named after the same AGENTS.md). Pair title plus folder
-    // first, then title alone, so a terminal in that folder isn't robbed by one elsewhere with the newer mtime.
-    for (const sameFolder of [true, false]) {
-      for (const a of [...list].sort((x, y) => y.depth - x.depth)) {
-        if (out[a.address]) continue;
-        const t = clean(titleOf(a.address)), here = folderOf(a.address);
-        if (!t || (sameFolder && !here)) continue;
-        const s = sessions.filter((s) => !used.has(s.session) && fits(a.address, s) && sameTitle(t, clean(s.title)) && (!sameFolder || norm(s.cwd) === here))
-          .sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
-        if (s) { out[a.address] = s; used.add(s.session); }
-      }
-    }
-    // Terminals started together launch their agents in the same order, so pair them in order:
-    // the earliest unused session that started within a minute after each terminal's creation.
-    const byStart = [...sessions].sort((x, y) => x.started - y.started);
-    for (const a of [...list].filter((a) => this.created[a.address] && !out[a.address]).sort((x, y) => this.created[x.address] - this.created[y.address])) {
-      const c = this.created[a.address];
-      const s = byStart.find((s) => !used.has(s.session) && fits(a.address, s) && s.started - c >= -2000 && s.started - c < 60000);
-      if (s) { out[a.address] = s; used.add(s.session); }
-    }
-    for (const a of list) {
-      if (out[a.address]) continue;
-      const here = folderOf(a.address);
-      const cand = sessions.filter((s) => !used.has(s.session) && fits(a.address, s) && here && norm(s.cwd) === here).sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
-      if (cand) { out[a.address] = cand; used.add(cand.session); }
-    }
-    return out;
+    const folderOf = (addr) => normPath(cwds[addr] ?? terminals().find((x) => x.address === addr)?.cwd);
+    return matchSessions(this.data?.sessions ?? [], list, { created: this.created, titleOf, folderOf, kinds });
   }
 
   // Brutalist summary: big mono numbers, thick borders, solid blocks. Turns red and blinks when someone is needed.
-  hero(t, { space, rows, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
+  hero(t, { space, rows, loading, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
     const MONO = "JetBrains Mono";
     // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
     const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
@@ -266,22 +151,32 @@ export default class AgentMetrics extends View {
             .on_click((_e, cx) => { cx.stop_propagation(); this.view = k; cx.notify(); })
             .child(label);
         })))
+      .child(h_flex().px(10).pb(4).gap(6).items_center()
+        .child(div().flex_none().text_size(9).font_family(MONO).font_bold().text_color(fg).child("SCOPE"))
+        .children([["space", "SPACE", "Agents of the shown space"], ["project", "PROJECT", "Agents in the focused terminal's folder, in any space"], ["all", "ALL", "Every agent in every space"]].map(([k, label, tip]) => {
+          const on = this.scope === k;
+          return div().id(`scope-${k}`).flex_1().h(15).flex().items_center().justify_center().cursor_pointer()
+            .text_size(9).font_family(MONO).font_black().border(1).border_color(fg)
+            .bg(on ? fg : "#00000000").text_color(on ? bg : fg).tooltip(tip)
+            .on_click((_e, cx) => { cx.stop_propagation(); this.scope = k; cx.notify(); })
+            .child(label);
+        })))
       // Headline row: tokens, with the agent and plugin counts big beside it.
       .child(h_flex().items_stretch()
         .child(v_flex().id("tokens-total").flex_1().min_w(0).px(10).justify_center()
           .tooltip(this.view === "cost" ? costTip(totalEst) : "Tokens (input + output + cache writes) of the selected view")
-          .child(div().text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(this.view === "cost" ? moneyOf(totalUsd, totalEst) : fmt(totalTok)))
+          .child(div().text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(loading ? "…" : this.view === "cost" ? moneyOf(totalUsd, totalEst) : fmt(totalTok)))
           .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(this.view === "cost" ? "EST. COST" : "TOKENS")))
-        .children([[rows.length, "AGENTS"], [cfg.plugins, "PLUGINS"]].map(([n, label]) =>
+        .children([[rows.length, "AGENTS"], [loading ? "…" : cfg.plugins, "PLUGINS"]].map(([n, label]) =>
           v_flex().id(`head-${label}`).flex_none().w(66).items_center().justify_center().py(4)
             .child(div().text_size(30).font_family(MONO).font_black().text_color(fg).child(String(n)))
             .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label)))))
       .child(h_flex().border_t(2).border_color(fg)
-        .child(cell(`${cachePct}%`, "CACHE"))
-        .child(cell(`${Math.round(ctxPct * 100)}%`, "CTX MAX", true, ctxPct >= HIGH)))
+        .child(cell(loading ? "…" : `${cachePct}%`, "CACHE"))
+        .child(cell(loading ? "…" : `${Math.round(ctxPct * 100)}%`, "CTX MAX", true, !loading && ctxPct >= HIGH)))
       .child(h_flex().border_t(2).border_color(fg)
-        .child(cell(String(cfg.mcp), "MCP"))
-        .child(cell(String(cfg.hooks), "HOOKS", true)))
+        .child(cell(loading ? "…" : String(cfg.mcp), "MCP"))
+        .child(cell(loading ? "…" : String(cfg.hooks), "HOOKS", true)))
       .child(h_flex().border_t(2).border_color(fg).px(10).py(5).gap(8).items_start()
         .child(div().flex_none().text_size(10).font_family(MONO).font_bold().text_color(fg).child(accounts.length > 1 ? `${accounts.length} CONTAS` : (accounts[0]?.org ?? "CONTA").toUpperCase()))
         .child(v_flex().flex_1().min_w(0)
@@ -294,7 +189,14 @@ export default class AgentMetrics extends View {
     const space = spaces().find((s) => s.active);
     const all = terminals();
     // Agents shown in this space, then their sub-agents (terminals an agent started), indented under them.
-    const top = agents().filter((a) => a.space === space?.id);
+    // Scope: the shown space, every agent whose folder is the focused terminal's folder (any space), or all agents.
+    const normDir = (p) => (p ?? "").replaceAll("\\", "/").replace(/^\/\/wsl[.]localhost\/[^/]+/i, "").replace(/\/+$/, "").toLowerCase();
+    const paneDir = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
+    const projectDir = normDir(focused()?.cwd ?? space?.folder);
+    const inScope = (a) => this.scope === "all" ? true
+      : this.scope === "project" ? Boolean(projectDir) && normDir(paneDir[a.address] ?? terminals().find((x) => x.address === a.address)?.cwd) === projectDir
+      : a.space === space?.id;
+    const top = agents().filter(inScope);
     const list = [];
     // One card per terminal: `agents()` also lists sub-agents, which walk() already nests under their parent.
     const placed = new Set();
@@ -351,6 +253,8 @@ export default class AgentMetrics extends View {
     const needs = rows.filter((r) => r.state === "blocked").length;
     const waiting = rows.filter((r) => r.state === "waiting").length;
 
+    // Honest numbers: nothing is zero until the collector has answered once; a failed read keeps the last data.
+    const loading = !this.data && !this.error;
     const color = { blocked: t.blocked, waiting: t.accent, working: t.working, done: t.done, idle: t.dim };
     // Brutalist rows: square blocks, 2px borders, mono caps, a solid status stamp, a chunky segmented bar.
     const MONO = "JetBrains Mono";
@@ -382,15 +286,6 @@ export default class AgentMetrics extends View {
       return h_flex().h(5).w_full().gap(2).children(Array.from({ length: SEGS }, (_, i) =>
         div().flex_1().h_full().bg(i < nBase ? BASE_C : i < nUsed ? conv : FREE_C)));
     };
-    // ~N turns until the window is full, from the average growth of the last turns (null when not growing).
-    const turnsLeft = (s) => {
-      const h = s?.hist ?? [], d = [];
-      for (let i = 1; i < h.length; i++) if (h[i] > h[i - 1]) d.push(h[i] - h[i - 1]);
-      if (d.length < 2) return null;
-      const avg = d.reduce((x, y) => x + y, 0) / d.length;
-      return Math.max(0, Math.ceil((winOf(s) - s.ctx) / avg));
-    };
-    const age = (ms) => { const m = Math.floor(ms / 60000); return m < 1 ? "now" : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`; };
 
     // /clear: types /clear into the agent's terminal, starting a fresh context. It throws the conversation
     // away, so the first click arms it (CONFIRM?) and a second click within 3s sends it. Codex has /clear too.
@@ -469,7 +364,7 @@ export default class AgentMetrics extends View {
             .child(stamp(r)))
           .child(s ? bar(r) : div().h(5).border(2).border_color(t.border))
           .child(h_flex().gap(8).items_baseline().text_size(11).font_family(MONO).text_color(t.muted)
-            .when(!s, (el) => el.child(div().font_bold().text_color(ink).child("NO DATA")))
+            .when(!s, (el) => el.child(div().font_bold().text_color(ink).when(loading, (e) => e.loop("opacity", { from: 0.35, to: 1, period: 1200 })).child(loading ? "READING…" : "NO DATA")))
             .when(Boolean(s), (el) => {
               // Narrow panels: context and the right-hand figure always show; the secondary items give way first,
               // elapsed time, then turns left, then cache (estimated mono widths against the room).
@@ -508,9 +403,21 @@ export default class AgentMetrics extends View {
 
     return v_flex().id("metrics-root").size_full().bg(t.chrome).overflow_hidden()
       .on_size_change((size, cx) => { if (Math.abs(size.width - this.width) > 1) { this.width = size.width; cx.notify(); } })
-      .child(this.hero(t, { space, rows, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }))
+      .child(this.hero(t, { space, rows, loading, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }))
       .child(v_flex().id("metrics-list").flex_1().min_h(0).px(8).pb(8).gap(8).overflow_y_scrollbar()
-        .when(rows.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child("No agents in this space")))
+        // A failed read: say so beside the data that is still shown, and retry on the next refresh (or now).
+        .when(Boolean(this.error), (el) => el.child(h_flex().flex_none().id("metrics-error").items_center().gap(8).px(8).py(5)
+          .border(2).border_color(t.blocked).bg(t.blocked + "26")
+          .child(div().flex_1().min_w(0).truncate().text_size(10.5).font_family(MONO).font_bold().text_color(t.blocked)
+            .tooltip(this.error).child(`${this.data ? "STALE · " : ""}READ FAILED: ${this.error}`))
+          .child(div().id("metrics-retry").flex_none().px(6).h(18).flex().items_center().cursor_pointer()
+            .text_size(10.5).font_family(MONO).font_black().border(2).border_color(t.blocked).text_color(t.blocked)
+            .on_click((_e, cx) => { cx.stop_propagation(); this.busy = false; this.refresh(cx); cx.notify(); })
+            .child("RETRY"))))
+        // First read pending: the shape of the cards, pulsing, instead of an empty list.
+        .when(loading && rows.length === 0, (el) => el.children([0, 1, 2].map((i) =>
+          div().id(`skel-${i}`).flex_none().h(86).border(2).border_color(t.border).bg(t.surface).loop("opacity", { from: 0.3, to: 0.8, period: 1200 }))))
+        .when(!loading && rows.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.scope === "project" ? "No agents in this folder" : this.scope === "all" ? "No agents" : "No agents in this space")))
         .children(rows.map(row)));
   }
 }
