@@ -9,7 +9,7 @@ use (Codex), and how full its context window is. No financial cost is shown.
 ## Features
 
 - **Summary box** at the top of the panel, in compact cells (value over label):
-  - the tokens of the space, with **SESSION** and **LAST TURN** tabs, and the account each session
+  - the tokens of the space, with **SESSION**, **LAST TURN** and **COST** tabs, and the account each session
     runs as;
   - `AGENTS` and `PLUGINS` counts, big, beside the token count;
   - `CACHE` (cache reads as a share of all input
@@ -118,8 +118,11 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 ## Notes
 
-- Financial cost is deliberately not shown: it can't be computed accurately from the
-  transcripts. Tokens are input + output + cache writes.
+- Cost lives in its own **COST** tab, never in the other two. It is an estimate: what the
+  session's tokens would cost on the Anthropic API at list price (the `PRICES` table in
+  `mods/agent-metrics/main.js`), not what a subscription bills. A model missing from the
+  table is priced as its family's current model and shows with a `~`. Tokens are input +
+  output + cache writes. `node scripts/test-cost.mjs` checks the math.
 - Codex on a ChatGPT plan: its card shows the share of the plan's rate limit used
   in place of the token figure.
 - A terminal is paired only with a session of its own kind: Claude with

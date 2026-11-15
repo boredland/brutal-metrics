@@ -11,6 +11,36 @@ const FLOW_KEY = "flow.events", FLOW_HEARTBEAT_MS = 15000;
 
 const DISTRO = "Ubuntu";
 const REFRESH_MS = 5000;
+// Anthropic API list prices, USD per million tokens: [input, output, cache read, cache write 5m, cache write 1h].
+// Source: platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-12). Keyed by model id without a
+// date suffix; "@long" is a request over the model's long-prompt size (the collector tags those).
+const PRICES = {
+  "claude-fable-5-2": [8, 40, 0.2, 10, 16],
+  "claude-mythos-5-2": [8, 40, 0.2, 10, 16],
+  "claude-fable-5-1": [10, 50, 0.25, 12.5, 20],
+  "claude-mythos-5-1": [10, 50, 0.25, 12.5, 20],
+  "claude-fable-5": [10, 50, 1, 12.5, 20],
+  "claude-mythos-5": [10, 50, 1, 12.5, 20],
+  "claude-opus-5-5": [4, 20, 0.2, 5, 8],
+  "claude-opus-5": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-8": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-7": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-6": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-5": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-1": [15, 75, 1.5, 18.75, 30],
+  "claude-opus-4": [15, 75, 1.5, 18.75, 30],
+  "claude-sonnet-5-5": [2, 10, 0.1, 2.5, 4],
+  "claude-sonnet-5": [2, 10, 0.2, 2.5, 4],
+  "claude-sonnet-4-6": [3, 15, 0.3, 3.75, 6],
+  "claude-sonnet-4-5": [3, 15, 0.3, 3.75, 6],
+  "claude-sonnet-4": [3, 15, 0.3, 3.75, 6],
+  "claude-haiku-5-5": [0.1, 0.5, 0.01, 0.125, 0.2],
+  "claude-haiku-5-5@long": [0.5, 2.5, 0.05, 0.625, 1],
+  "claude-haiku-4-5": [1, 5, 0.1, 1.25, 2],
+};
+// A model not in the table: priced by its family's current model, and the cost is shown as an estimate (~).
+const FAMILY = [[/fable|mythos/, "claude-fable-5-2"], [/opus/, "claude-opus-5-5"], [/haiku/, "claude-haiku-5-5"], [/./, "claude-sonnet-5-5"]];
+const COST_TIP = "API-equivalent cost at Anthropic list prices, not what a subscription is billed";
 const WARN = 0.6, HIGH = 0.8;
 // Context window: Claude Code reports no limit, so infer it (over 200k means the 1M window).
 const windowOf = (ctx) => (ctx > 200_000 ? 1_000_000 : 200_000);
@@ -22,6 +52,8 @@ const isCodex = (s) => s?.agent === "codex";
 
 const fmt = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n));
 
+const money = (x) => (x >= 100 ? "$" + Math.round(x) : x >= 10 ? "$" + x.toFixed(1) : "$" + x.toFixed(2));
+
 // Account of a session as the collector resolved it: login email, or the credential kind (API KEY, BEDROCK...).
 const acctName = (a) => (a ? (a.kind === "login" ? a.email : a.label) : null);
 const acctKey = (a) => acctName(a) ?? "?";
@@ -31,6 +63,29 @@ function turnOf(s) {
   const t = s?.turn;
   return t ? { in: t.in, out: t.out, cache_read: t.cr, cache_write: t.cw, by_model: t.by } : s;
 }
+
+// Price row of a collector model key: exact id, then the id without a date suffix (-20251001), else null.
+function priceOf(key) {
+  const [id, tier] = key.split("@"), base = id.replace(/-\d{8}$/, ""), sfx = tier ? "@" + tier : "";
+  return PRICES[id + sfx] ?? PRICES[base + sfx] ?? PRICES[base] ?? null;
+}
+
+// USD of a by-model usage map ({model: [in, out, cache read, write 5m, write 1h]}; an older 4-long row's write
+// counts as 5m). `estimated` is true when some model with usage had no price of its own.
+function costOf(by) {
+  let usd = 0, estimated = false;
+  for (const [key, [i = 0, o = 0, cr = 0, w5 = 0, w1 = 0]] of Object.entries(by ?? {})) {
+    let p = priceOf(key);
+    if (!p) {
+      p = PRICES[FAMILY.find(([re]) => re.test(key))[1]];
+      if (i || o || cr || w5 || w1) estimated = true;
+    }
+    usd += (i * p[0] + o * p[1] + cr * p[2] + w5 * p[3] + w1 * p[4]) / 1e6;
+  }
+  return { usd, estimated };
+}
+const moneyOf = (usd, estimated) => (estimated ? "~" : "") + money(usd);
+const costTip = (estimated) => COST_TIP + (estimated ? ". Estimated: a model here has no list price in the table, so its family's price is used" : "");
 
 // A Windows path as WSL sees it (C:\Users\you -> /mnt/c/Users/you); other paths unchanged.
 function wslPath(p) {
@@ -68,7 +123,7 @@ export default class AgentMetrics extends View {
     this.width = 300;
     this.busy = false;
     this.tick = 0; this.anim = false;
-    this.view = "total"; // "total" = whole session (default), "turn" = last turn
+    this.view = "total"; // "total" = whole session (default), "turn" = last turn, "cost" = session cost
     // Avatars step through their poses only while some agent is active (each tick redraws the window).
     cx.timer.every(200, (cx) => { if (this.anim) { this.tick++; cx.notify(); } });
     cx.timer.every(REFRESH_MS, (cx) => this.refresh(cx));
@@ -183,7 +238,7 @@ export default class AgentMetrics extends View {
   }
 
   // Brutalist summary: big mono numbers, thick borders, solid blocks. Turns red and blinks when someone is needed.
-  hero(t, { space, rows, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
+  hero(t, { space, rows, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
     const MONO = "JetBrains Mono";
     // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
     const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
@@ -202,21 +257,21 @@ export default class AgentMetrics extends View {
         .when(hot, (el) => el.child(div().px(6).bg(fg).text_size(11).font_family(MONO).font_black().text_color(bg).loop("opacity", { from: 0.25, to: 1, period: 650 }).child(`${needs} NEEDS YOU`)))
         .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`)))))
       .child(h_flex().px(10).pt(6).pb(2).gap(6)
-        .children([["total", "SESSION"], ["turn", "LAST TURN"]].map(([k, label]) => {
+        .children([["total", "SESSION"], ["turn", "LAST TURN"], ["cost", "COST"]].map(([k, label]) => {
           const on = this.view === k;
           return div().id(`view-${k}`).flex_1().h(18).flex().items_center().justify_center().cursor_pointer()
             .text_size(10).font_family(MONO).font_black().border(2).border_color(fg)
             .bg(on ? fg : "#00000000").text_color(on ? bg : fg)
-            .tooltip(k === "turn" ? "Tokens and cache since the last prompt" : "Tokens and cache of the whole session")
+            .tooltip(k === "turn" ? "Tokens and cache since the last prompt" : k === "cost" ? "Estimated API-equivalent cost of the whole session" : "Tokens and cache of the whole session")
             .on_click((_e, cx) => { cx.stop_propagation(); this.view = k; cx.notify(); })
             .child(label);
         })))
       // Headline row: tokens, with the agent and plugin counts big beside it.
       .child(h_flex().items_stretch()
         .child(v_flex().id("tokens-total").flex_1().min_w(0).px(10).justify_center()
-          .tooltip("Tokens (input + output + cache writes) of the selected view")
-          .child(div().text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(fmt(totalTok)))
-          .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child("TOKENS")))
+          .tooltip(this.view === "cost" ? costTip(totalEst) : "Tokens (input + output + cache writes) of the selected view")
+          .child(div().text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(this.view === "cost" ? moneyOf(totalUsd, totalEst) : fmt(totalTok)))
+          .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(this.view === "cost" ? "EST. COST" : "TOKENS")))
         .children([[rows.length, "AGENTS"], [cfg.plugins, "PLUGINS"]].map(([n, label]) =>
           v_flex().id(`head-${label}`).flex_none().w(66).items_center().justify_center().py(4)
             .child(div().text_size(30).font_family(MONO).font_black().text_color(fg).child(String(n)))
@@ -267,9 +322,11 @@ export default class AgentMetrics extends View {
       const kids = all.filter((x) => x.parent === a.address && x.state === "live" && (x.status === "working" || x.status === "blocked"));
       const state = a.status === "blocked" ? "blocked" : kids.length > 0 ? "waiting" : a.status;
       const s = sess[a.address];
-      const u = this.view === "total" ? s : turnOf(s);
+      const u = this.view === "turn" ? turnOf(s) : s;
       const kind = s?.agent ?? kindOfApp(agents().find((x) => x.address === a.address)?.app);
-      return { a, name: a.name, kids, state, s, u, kind };
+      // Cost only in the COST tab. Codex runs on a ChatGPT plan: no price table applies (its card shows plan use).
+      const { usd, estimated: est } = this.view === "cost" && s && !isCodex(s) ? costOf(s.by_model) : { usd: 0, estimated: false };
+      return { a, name: a.name, kids, state, s, u, usd, est, kind };
     });
 
     // Accounts in this space, from each agent's own session; most used first.
@@ -282,6 +339,7 @@ export default class AgentMetrics extends View {
     const accounts = [...tally.values()].sort((x, y) => y.n - x.n);
     const mainAcct = accounts[0]?.name;
     this.anim = rows.some((r) => animated(r.state));
+    const totalUsd = rows.reduce((x, r) => x + r.usd, 0), totalEst = rows.some((r) => r.est);
     const totalTok = rows.reduce((x, r) => x + (r.u ? r.u.in + r.u.out + r.u.cache_write : 0), 0);
     // Space-wide cache hit (same formula as a card) and the fullest context among its agents.
     const cs = rows.filter((r) => r.s);
@@ -415,7 +473,7 @@ export default class AgentMetrics extends View {
             .when(Boolean(s), (el) => {
               // Narrow panels: context and the right-hand figure always show; the secondary items give way first,
               // elapsed time, then turns left, then cache (estimated mono widths against the room).
-              const ctxTxt = `${fmt(ctx)}/${fmt(win)}`, rightTxt = isCodex(s) ? (planPct === null ? "—" : `${planPct}%`) : fmt(r.u.in + r.u.out + r.u.cache_write);
+              const ctxTxt = `${fmt(ctx)}/${fmt(win)}`, rightTxt = isCodex(s) ? (planPct === null ? "—" : `${planPct}%`) : this.view === "cost" ? moneyOf(r.usd, r.est) : fmt(r.u.in + r.u.out + r.u.cache_write);
               const extras = [
                 { txt: `⚡${cache}%`, el: div().flex_none().child(`⚡${cache}%`) },
                 left !== null && { txt: `~${left > 99 ? "99+" : left}T`, el: div().flex_none().text_color(left <= 10 ? "#b09270" : t.muted).font_bold().child(`~${left > 99 ? "99+" : left}T`) },
@@ -429,7 +487,7 @@ export default class AgentMetrics extends View {
               .child(div().flex_none().font_bold().text_color(pct >= HIGH ? t.blocked : ink).child(ctxTxt))
               .child(h_flex().flex_1().min_w(0).gap(8).items_baseline().overflow_hidden().children(keep.map((x) => x.el)))
               .when(!isCodex(s), (e) => e.child(div().flex_none().id(`tok-${r.a.address}`).text_size(15).font_black().text_color(t.foreground)
-                .tooltip("Tokens (input + output + cache writes) of the selected view").child(rightTxt)))
+                .tooltip(this.view === "cost" ? costTip(r.est) : "Tokens (input + output + cache writes) of the selected view").child(rightTxt)))
               .when(isCodex(s), (e) => e.child(div().flex_none().id(`plan-${r.a.address}`).text_size(15).font_black().text_color(planPct >= 80 ? t.blocked : t.foreground)
                 .tooltip(`${plan?.type ? plan.type.toUpperCase() + " plan" : "Plan"}: ${planPct ?? "?"}% of the ${plan?.window_min ? Math.round(plan.window_min / 1440) + "-day" : ""} limit used`)
                 .child(planPct === null ? "—" : `${planPct}%`)));
@@ -450,7 +508,7 @@ export default class AgentMetrics extends View {
 
     return v_flex().id("metrics-root").size_full().bg(t.chrome).overflow_hidden()
       .on_size_change((size, cx) => { if (Math.abs(size.width - this.width) > 1) { this.width = size.width; cx.notify(); } })
-      .child(this.hero(t, { space, rows, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }))
+      .child(this.hero(t, { space, rows, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }))
       .child(v_flex().id("metrics-list").flex_1().min_h(0).px(8).pb(8).gap(8).overflow_y_scrollbar()
         .when(rows.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child("No agents in this space")))
         .children(rows.map(row)));
