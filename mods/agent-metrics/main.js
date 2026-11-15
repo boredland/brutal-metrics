@@ -2,13 +2,20 @@
 // for agents that need a human (blocked) or are waiting on other agents.
 // Data: Claude Code transcripts and Codex rollouts, read in WSL by collect.py. Read-only; no network.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, HoverCard } from "gpui-base";
 import { avatar, animated } from "./avatar.js";
-import { HIGH, winOf, kindOfApp, isCodex, fmt, moneyOf, costTip, costOf, acctName, acctKey, turnOf, wslPath, turnsLeft, age, normPath, matchSessions } from "./model.js";
-import { spaces, agents, terminals, panes, focused, exec, hc, appHome, home, window, theme, run, shared, setShared, settings } from "herdr";
+import { SCOPE_KEY, SCOPES, normDir, inScope } from "./scope.js";
+import { HIGH, detailOf, detailRows, winOf, kindOfApp, isCodex, fmt, moneyOf, costTip, costOf, acctName, acctKey, turnOf, wslPath, turnsLeft, age, normPath, matchSessions } from "./model.js";
+import { spaces, agents, terminals, panes, focused, exec, hc, appHome, home, window, theme, run, shared, setShared, settings, props as blockProps, openOverlay, closeOverlay } from "herdr";
 
 // Feed for the Flow tab (agent-flow): the collector's message events, `to` resolved here by match().
 const FLOW_KEY = "flow.events", FLOW_HEARTBEAT_MS = 15000;
+// The Flow tab's RETRY writes a time here; a newer one than the last seen reads again now.
+const RETRY_KEY = "metrics.retry";
+// Per-agent details for the detail dialog (opened from this tab and from the Flow tab): { at, by: { address: detailOf() } }.
+const DETAIL_KEY = "metrics.detail";
+// What ASK STATUS types into an agent: a short, answerable request.
+const ASK_TEXT = "Resuma em até 5 linhas: o que você está fazendo agora, o que falta e se algo está bloqueado.";
 
 const DISTRO = "Ubuntu";
 const REFRESH_MS = 5000;
@@ -38,8 +45,14 @@ function rainbowEdge(tick) {
     .child(h_flex().absolute().inset_0().child(v_flex().h_full().w(EDGE).children(vsegs(FY, (i) => 2 * FX + FY + (FY - 1 - i)))));
 }
 
+// Opens the detail dialog of one agent (the same mod, role "detail"; the Flow tab opens it too).
+const openDetail = (address) => openOverlay({ mod: "agent-metrics", kind: "dialog", props: { role: "detail", address }, width: 560, height: 600 });
+
 export default class AgentMetrics extends View {
   init(_props, cx) {
+    // The same mod draws the panel and, as a dialog (role "detail"), one agent's details.
+    this.role = blockProps()?.role ?? "panel";
+    if (this.role === "detail") { this.addr = blockProps()?.address ?? null; cx.timer.every(1000, (cx) => cx.notify()); return; }
     this.data = null;      // last collector output
     this.error = null;
     this.created = {};     // terminal address -> created_ms (never changes)
@@ -47,11 +60,13 @@ export default class AgentMetrics extends View {
     this.busy = false;
     this.tick = 0; this.anim = false;
     this.auto = false; this.autoAt = 0; // play/pause: rotate the tabs
-    this.scope = "space"; // which agents: "space" (the shown one), "project" (the focused folder, any space), "all"
+   
     this.view = "total"; // "total" = whole session (default), "turn" = last turn, "cost" = session cost
     // Avatars step through their poses only while some agent is active (each tick redraws the window).
     cx.timer.every(200, (cx) => { if (this.anim) { this.tick++; cx.notify(); } });
     cx.timer.every(1000, (cx) => {
+      const rt = shared(RETRY_KEY);
+      if (typeof rt === "number" && rt > (this.retryAt ?? 0)) { this.retryAt = rt; this.busy = false; this.refresh(cx); }
       if (!this.auto || Date.now() - this.autoAt < AUTO_MS) return;
       const order = ["total", "turn", "cost"];
       this.view = order[(order.indexOf(this.view) + 1) % order.length];
@@ -87,14 +102,35 @@ export default class AgentMetrics extends View {
         this.data = JSON.parse(r.stdout);
         this.error = null;
         this.publishFlow();
+        this.publishDetail();
       } catch (e) {
         this.error = String(e?.message ?? e);
-        // The Flow tab falls back to simulated sends while the feed is down.
-        if (shared(FLOW_KEY)?.ok) { this.flowSig = null; setShared(FLOW_KEY, { ok: false, at: Date.now(), error: this.error, events: [] }); }
+        // The Flow tab says the feed is down (it draws no sends meanwhile).
+        if (shared(FLOW_KEY)?.ok || shared(FLOW_KEY)?.error !== this.error) { this.flowSig = null; setShared(FLOW_KEY, { ok: false, at: Date.now(), error: this.error, events: [] }); }
       }
       if (run === this.run) this.busy = false;
       cx.notify();
     });
+  }
+
+  // Every agent of every space and their live sub-agent terminals, as match() wants them.
+  allNodes() {
+    const all = terminals(), list = [];
+    const walk = (addr, depth) => {
+      for (const x of all.filter((x) => x.parent === addr && x.state === "live")) { list.push({ address: x.address, depth }); walk(x.address, depth + 1); }
+    };
+    for (const a of agents()) { list.push({ address: a.address, depth: 0 }); walk(a.address, 1); }
+    return list;
+  }
+
+  // Publishes each agent's details (what the detail dialog shows) when they change.
+  publishDetail() {
+    const by = {};
+    for (const [addr, s] of Object.entries(this.match(this.allNodes()))) by[addr] = detailOf(s);
+    const sig = JSON.stringify(by);
+    if (sig === this.detailSig) return;
+    this.detailSig = sig;
+    setShared(DETAIL_KEY, { at: Date.now(), by });
   }
 
   // Publishes the collector's events (contract: id, seq, ts, from, from_name, to, to_session, kind, summary)
@@ -104,11 +140,7 @@ export default class AgentMetrics extends View {
   publishFlow() {
     const evs = this.data?.events;
     if (!Array.isArray(evs)) return;
-    const all = terminals(), list = [];
-    const walk = (addr, depth) => {
-      for (const x of all.filter((x) => x.parent === addr && x.state === "live")) { list.push({ address: x.address, depth }); walk(x.address, depth + 1); }
-    };
-    for (const a of agents()) { list.push({ address: a.address, depth: 0 }); walk(a.address, 1); }
+    const list = this.allNodes();
     const bySession = {};
     for (const [addr, s] of Object.entries(this.match(list))) bySession[s.session] = addr;
     const events = evs
@@ -132,7 +164,7 @@ export default class AgentMetrics extends View {
   }
 
   // Brutalist summary: big mono numbers, thick borders, solid blocks. Turns red and blinks when someone is needed.
-  hero(t, { space, rows, loading, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
+  hero(t, { space, rows, loading, tips, headline, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
     const MONO = "JetBrains Mono";
     // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
     const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
@@ -140,16 +172,34 @@ export default class AgentMetrics extends View {
     const hot = needs > 0;
     // Palette grays from the reference still; rust (#95553a) when someone is needed.
     const bg = hot ? "#95553a" : "#7a8076", fg = "#0a1312", edge = hot ? "#b09270" : "#95a7a7";
-    // Compact stat cell: value over label, centered, thin rule on the right. `warn` tints the value.
-    const cell = (value, label, last, warn) => v_flex().flex_1().min_w(0).px(4).py(4).items_center()
-      .when(!last, (el) => el.border_r(2).border_color(fg))
-      .child(div().text_size(15).font_family(MONO).font_black().text_color(warn ? "#522d1b" : fg).truncate().child(value))
-      .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label));
+    // Hover card: rests on `trigger` for 250ms, then lists `lines` ([name, value]) under a title.
+    const MAXL = 10;
+    const hov = (id, trigger, title, lines) => {
+      if (!lines?.length) return trigger;
+      const card = v_flex().min_w(160).max_w(300).p(8).gap(3).bg(t.popover).border(1).border_color(t.border).rounded(6)
+        .child(div().text_size(9).font_family(MONO).font_bold().text_color(t.dim).child(title))
+        .children(lines.slice(0, MAXL).map(([k, v]) => h_flex().gap(12).items_baseline()
+          .child(div().flex_1().min_w(0).truncate().text_size(10.5).font_family(MONO).text_color(t.foreground).child(String(k)))
+          .child(div().flex_none().text_size(10.5).font_family(MONO).font_bold().text_color(t.muted).child(String(v ?? "")))))
+        .when(lines.length > MAXL, (el) => el.child(div().text_size(9.5).font_family(MONO).text_color(t.dim).child(`+${lines.length - MAXL} more`)));
+      return HoverCard.new(id).open_delay(250).trigger(trigger).content(card);
+    };
+    // Compact stat cell: value over label, centered, thin rule on the right. `warn` tints the value;
+    // `lines` (optional) are what its hover card lists.
+    const cell = (value, label, last, warn, lines) => {
+      const el = v_flex().w_full().min_w(0).px(4).py(4).items_center()
+        .when(!last, (e) => e.border_r(2).border_color(fg))
+        .child(div().text_size(15).font_family(MONO).font_black().text_color(warn ? "#522d1b" : fg).truncate().child(value))
+        .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label));
+      return div().flex_1().min_w(0).child(hov(`hov-${label}`, el, label, lines));
+    };
     return div().flex_none().p(8).child(v_flex().w_full().border(3).border_color(edge).bg(bg)
-      .when(hot || waiting > 0, (el) => el.child(h_flex().px(10).pt(6).items_center().gap(8)
-        .child(div().flex_1())
+      // Headline: one line on what the agents are doing; the blocked and waiting chips sit beside it.
+      .child(h_flex().px(10).pt(6).items_center().gap(8)
+        .child(div().flex_1().min_w(0).truncate().text_size(11).font_family(MONO).font_black().text_color(fg)
+          .when(loading, (el) => el.loop("opacity", { from: 0.35, to: 1, period: 1200 })).child(headline))
         .when(hot, (el) => el.child(div().px(6).bg(fg).text_size(11).font_family(MONO).font_black().text_color(bg).loop("opacity", { from: 0.25, to: 1, period: 650 }).child(`${needs} NEEDS YOU`)))
-        .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`)))))
+        .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`))))
       .child(h_flex().px(10).pt(6).pb(2).gap(6)
         .children([["total", "SESSION"], ["turn", "LAST TURN"], ["cost", "COST"]].map(([k, label]) => {
           const on = this.view === k;
@@ -170,19 +220,19 @@ export default class AgentMetrics extends View {
       .child((() => {
         const txt = loading ? "…" : this.view === "cost" ? moneyOf(totalUsd, totalEst) : fmt(totalTok);
         const size = txt.length <= 5 ? 42 : txt.length <= 7 ? 34 : txt.length <= 9 ? 28 : 22;
-        return v_flex().id("tokens-total").w_full().px(10).py(2).items_center().justify_center()
-          .tooltip(this.view === "cost" ? costTip(totalEst) : "Tokens (input + output + cache writes) of the selected view")
+        const fig = v_flex().id("tokens-total").w_full().px(10).py(2).items_center().justify_center()
           .child(div().text_size(size).font_family(MONO).font_black().text_color(fg).child(txt))
           .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(this.view === "cost" ? "EST. COST" : "TOKENS"));
+        return div().w_full().child(hov("hov-figure", fig, this.view === "cost" ? "COST BY AGENT" : "TOKENS BY AGENT", tips.figure));
       })())
       .child(h_flex().border_t(2).border_color(fg)
-        .child(cell(String(rows.length), "AGENTS"))
-        .child(cell(loading ? "…" : `${cachePct}%`, "CACHE"))
-        .child(cell(loading ? "…" : `${Math.round(ctxPct * 100)}%`, "CTX MAX", true, !loading && ctxPct >= HIGH)))
+        .child(cell(String(rows.length), "AGENTS", false, false, tips.agents))
+        .child(cell(loading ? "…" : `${cachePct}%`, "CACHE", false, false, tips.cache))
+        .child(cell(loading ? "…" : `${Math.round(ctxPct * 100)}%`, "CTX MAX", true, !loading && ctxPct >= HIGH, tips.ctx)))
       .child(h_flex().border_t(2).border_color(fg)
-        .child(cell(loading ? "…" : String(cfg.plugins), "PLUGINS"))
-        .child(cell(loading ? "…" : String(cfg.mcp), "MCP"))
-        .child(cell(loading ? "…" : String(cfg.hooks), "HOOKS", true)))
+        .child(cell(loading ? "…" : String(cfg.plugins), "PLUGINS", false, false, tips.plugins))
+        .child(cell(loading ? "…" : String(cfg.mcp), "MCP", false, false, tips.mcp))
+        .child(cell(loading ? "…" : String(cfg.hooks), "HOOKS", true, false, tips.hooks)))
       .child(h_flex().border_t(2).border_color(fg).px(10).py(5).gap(8).items_start()
         .child(div().flex_none().text_size(10).font_family(MONO).font_bold().text_color(fg).child(accounts.length > 1 ? `${accounts.length} CONTAS` : (accounts[0]?.org ?? "CONTA").toUpperCase()))
         .child(v_flex().flex_1().min_w(0)
@@ -190,30 +240,67 @@ export default class AgentMetrics extends View {
             div().truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(accounts.length > 1 ? `${x.name} ×${x.n}` : x.name)))))
       .child(h_flex().border_t(2).border_color(fg).px(10).py(5).gap(6).items_center()
         .child(div().flex_none().text_size(9).font_family(MONO).font_bold().text_color(fg).child("SCOPE"))
-        .children([["space", "SPACE", "Agents of the shown space"], ["project", "PROJECT", "Agents in the focused terminal's folder, in any space"], ["all", "ALL", "Every agent in every space"]].map(([k, label, tip]) => {
-          const on = this.scope === k;
+        .children(SCOPES.map(([k, label, tip]) => {
+          const on = (shared(SCOPE_KEY) ?? "space") === k;
           return div().id(`scope-${k}`).flex_1().h(15).flex().items_center().justify_center().cursor_pointer()
             .text_size(9).font_family(MONO).font_black().border(1).border_color(fg)
             .bg(on ? fg : "#00000000").text_color(on ? bg : fg).tooltip(tip)
-            .on_click((_e, cx) => { cx.stop_propagation(); this.scope = k; cx.notify(); })
+            .on_click((_e, cx) => { cx.stop_propagation(); setShared(SCOPE_KEY, k); cx.notify(); })
             .child(label);
         })))
     );
   }
 
+  // The detail dialog: everything the collector knows about one agent, and a few actions on it.
+  detail() {
+    const t = theme(), MONO = "JetBrains Mono";
+    const d = shared(DETAIL_KEY)?.by?.[this.addr] ?? null;
+    const a = agents().find((x) => x.address === this.addr), term = terminals().find((x) => x.address === this.addr);
+    const name = String(term?.name || a?.title || this.addr).toUpperCase();
+    const status = a?.status ?? term?.status ?? "idle";
+    const close = () => { try { closeOverlay(blockProps().overlay); } catch (e) { /* already gone */ } };
+    const btn = (id, label, tip, fn, primary) => div().id(id).flex_none().px(10).h(26).flex().items_center().cursor_pointer()
+      .text_size(11).font_family(MONO).font_black().border(2).border_color(primary ? t.foreground : t.border)
+      .bg(primary ? t.foreground : "#00000000").text_color(primary ? t.background : t.muted)
+      .hover((s) => s.border_color(t.foreground).text_color(primary ? t.background : t.foreground))
+      .tooltip(tip).on_click((_e, cx) => { cx.stop_propagation(); fn(cx); }).child(label);
+    const send = (text) => hc(["send", this.addr, text]).catch((e) => { this.error = String(e?.message ?? e); });
+    const SEGS = 24, win = d?.win || 200000, nBase = d?.base ? Math.max(1, Math.round((d.base / win) * SEGS)) : 0;
+    const nUsed = d ? Math.min(SEGS, Math.max(nBase, Math.round((d.ctx / win) * SEGS))) : 0;
+    const full = d && d.ctx / win >= HIGH;
+    const c = { blocked: t.blocked, working: t.working, done: t.done, idle: t.dim }[status] ?? t.dim;
+    return v_flex().id("detail-root").size_full().bg(t.surface).p(16).gap(10)
+      .child(h_flex().items_center().gap(8)
+        .child(div().flex_1().min_w(0).truncate().text_size(16).font_family(MONO).font_black().text_color(t.foreground).child(name))
+        .when(Boolean(d), (el) => el.child(div().flex_none().text_size(10).font_family(MONO).font_bold().text_color(d.kind === "codex" ? "#adc1cc" : "#c9744f").child(String(d.kind).toUpperCase())))
+        .child(div().flex_none().px(6).h(18).flex().items_center().text_size(10.5).font_family(MONO).font_black().border(2).border_color(c).text_color(c).child(String(status).toUpperCase())))
+      .when(Boolean(d?.title), (el) => el.child(div().truncate().text_size(11).font_family(MONO).text_color(t.muted).child(d.title)))
+      .when(!d, (el) => el.child(div().text_size(12).font_family(MONO).text_color(t.dim).child("No collector data for this agent yet.")))
+      .when(Boolean(d), (el) => el.child(h_flex().h(6).w_full().gap(2).children(Array.from({ length: SEGS }, (_, i) =>
+        div().flex_1().h_full().bg(i < nBase ? "#7a8076" : i < nUsed ? (full ? "#95553a" : "#b09270") : "#1d1e19")))))
+      .when(Boolean(d), (el) => el.child(v_flex().id("detail-rows").flex_1().min_h(0).gap(5).overflow_y_scrollbar()
+        .children(detailRows(d, Date.now()).map(([k, v]) => h_flex().gap(12).items_baseline()
+          .child(div().flex_none().w(150).text_size(10).font_family(MONO).font_bold().text_color(t.dim).child(k))
+          .child(div().flex_1().min_w(0).text_size(11.5).font_family(MONO).text_color(t.foreground).child(v))))))
+      .when(!d, (el) => el.child(div().flex_1()))
+      .child(h_flex().gap(8).justify_end().items_center()
+        .child(btn("d-ask", "ASK STATUS", `Types into this agent: "${ASK_TEXT}"`, () => send(ASK_TEXT)))
+        .child(btn("d-compact", "/COMPACT", "Run /compact in this agent", () => send("/compact")))
+        .child(btn("d-open", "OPEN TERMINAL", "Show this agent's terminal", () => { try { run("agent.focus", { terminal: this.addr }); } catch (e) { /* gone */ } close(); }, true))
+        .child(btn("d-close", "CLOSE", "Esc also closes", close)));
+  }
+
   render() {
+    if (this.role === "detail") return this.detail();
     const t = theme();
     const space = spaces().find((s) => s.active);
     const all = terminals();
     // Agents shown in this space, then their sub-agents (terminals an agent started), indented under them.
     // Scope: the shown space, every agent whose folder is the focused terminal's folder (any space), or all agents.
-    const normDir = (p) => (p ?? "").replaceAll("\\", "/").replace(/^\/\/wsl[.]localhost\/[^/]+/i, "").replace(/\/+$/, "").toLowerCase();
+    const scope = shared(SCOPE_KEY) ?? "space";
     const paneDir = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
     const projectDir = normDir(focused()?.cwd ?? space?.folder);
-    const inScope = (a) => this.scope === "all" ? true
-      : this.scope === "project" ? Boolean(projectDir) && normDir(paneDir[a.address] ?? terminals().find((x) => x.address === a.address)?.cwd) === projectDir
-      : a.space === space?.id;
-    const top = agents().filter(inScope);
+    const top = agents().filter((a) => inScope(scope, { spaceId: space?.id, projectDir, agentSpace: a.space, agentDir: normDir(paneDir[a.address] ?? terminals().find((x) => x.address === a.address)?.cwd) }));
     const list = [];
     // One card per terminal: `agents()` also lists sub-agents, which walk() already nests under their parent.
     const placed = new Set();
@@ -265,8 +352,8 @@ export default class AgentMetrics extends View {
     const cachePct = Math.round((cs.reduce((x, r) => x + r.u.cache_read, 0) / Math.max(1, cs.reduce((x, r) => x + r.u.in + r.u.cache_read + r.u.cache_write, 0))) * 100);
     const ctxPct = cs.reduce((x, r) => Math.max(x, r.s.ctx / winOf(r.s)), 0);
     // What the space's folders have configured: the union over its agents, so a shared user setting counts once.
-    const union = (k) => new Set(cs.flatMap((r) => r.s.config?.[k] ?? [])).size;
-    const cfg = { plugins: union("plugins"), mcp: union("mcp"), hooks: union("hooks") };
+    const names = (k) => [...new Set(cs.flatMap((r) => r.s.config?.[k] ?? []))];
+    const cfg = { plugins: names("plugins").length, mcp: names("mcp").length, hooks: names("hooks").length };
     const needs = rows.filter((r) => r.state === "blocked").length;
     const waiting = rows.filter((r) => r.state === "waiting").length;
 
@@ -377,7 +464,10 @@ export default class AgentMetrics extends View {
             .child(r.a.address)))
         .child(v_flex().flex_1().min_w(0).p(8).gap(6)
           .child(h_flex().gap(8).items_center()
-            .child(div().flex_1().min_w(0).truncate().text_size(r.a.depth > 0 ? 11 : 12).font_family(MONO).font_black().text_color(r.a.focused ? t.accent : ink).child(r.name.toUpperCase()))
+            .child(div().id(`nm-${r.a.address}`).flex_1().min_w(0).truncate().cursor_pointer().text_size(r.a.depth > 0 ? 11 : 12).font_family(MONO).font_black().text_color(r.a.focused ? t.accent : ink)
+              .hover((s) => s.text_color(t.accent).underline()).tooltip("Details")
+              .on_click((_e, cx) => { cx.stop_propagation(); openDetail(r.a.address); })
+              .child(r.name.toUpperCase()))
             .child(stamp(r)))
           .child(s ? bar(r) : div().h(5).border(2).border_color(t.border))
           .child(h_flex().gap(8).items_baseline().text_size(11).font_family(MONO).text_color(t.muted)
@@ -418,9 +508,25 @@ export default class AgentMetrics extends View {
         .when(working, (el) => el.child(rainbowEdge(this.tick)));
     };
 
+    // Headline, and what each hover card lists (nothing until the first read: no empty cards).
+    const working = rows.filter((r) => r.state === "working").length;
+    const headline = loading ? "READING…" : this.error && !this.data ? "READ FAILED" : rows.length === 0 ? "NO AGENTS" : working > 0 ? `${working} WORKING` : "ALL IDLE";
+    const nm = (r) => r.name.toUpperCase();
+    const tokOf = (r) => (r.u ? r.u.in + r.u.out + r.u.cache_write : 0);
+    const costView = this.view === "cost";
+    const tips = loading ? {} : {
+      figure: rows.filter((r) => r.s && !(costView && isCodex(r.s))).sort((x, y) => (costView ? y.usd - x.usd : tokOf(y) - tokOf(x)))
+        .map((r) => [nm(r), costView ? moneyOf(r.usd, r.est) : fmt(tokOf(r))]),
+      agents: rows.map((r) => [nm(r), label(r)]),
+      cache: cs.map((r) => [nm(r), `${Math.round((r.u.cache_read / Math.max(1, r.u.in + r.u.cache_read + r.u.cache_write)) * 100)}%`]),
+      ctx: [...cs].sort((x, y) => y.s.ctx / winOf(y.s) - x.s.ctx / winOf(x.s))
+        .map((r) => [nm(r), `${fmt(r.s.ctx)}/${fmt(winOf(r.s))} · ${Math.round((r.s.ctx / winOf(r.s)) * 100)}%`]),
+      plugins: names("plugins").map((n) => [n, ""]), mcp: names("mcp").map((n) => [n, ""]), hooks: names("hooks").map((n) => [n, ""]),
+    };
+
     return v_flex().id("metrics-root").size_full().bg(t.chrome).overflow_hidden()
       .on_size_change((size, cx) => { if (Math.abs(size.width - this.width) > 1) { this.width = size.width; cx.notify(); } })
-      .child(this.hero(t, { space, rows, loading, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }))
+      .child(this.hero(t, { space, rows, loading, tips, headline, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }))
       .child(v_flex().id("metrics-list").flex_1().min_h(0).px(8).pb(8).gap(8).overflow_y_scrollbar()
         // A failed read: say so beside the data that is still shown, and retry on the next refresh (or now).
         .when(Boolean(this.error), (el) => el.child(h_flex().flex_none().id("metrics-error").items_center().gap(8).px(8).py(5)
@@ -434,7 +540,7 @@ export default class AgentMetrics extends View {
         // First read pending: the shape of the cards, pulsing, instead of an empty list.
         .when(loading && rows.length === 0, (el) => el.children([0, 1, 2].map((i) =>
           div().id(`skel-${i}`).flex_none().h(86).border(2).border_color(t.border).bg(t.surface).loop("opacity", { from: 0.3, to: 0.8, period: 1200 }))))
-        .when(!loading && rows.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.scope === "project" ? "No agents in this folder" : this.scope === "all" ? "No agents" : "No agents in this space")))
+        .when(!loading && rows.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child(scope === "project" ? "No agents in this folder" : scope === "all" ? "No agents" : "No agents in this space")))
         .children(rows.map(row)));
   }
 }

@@ -32,7 +32,10 @@ use (Codex), and how full its context window is. No financial cost is shown.
   other with `hc send`. The orchestrator sits on top, linked to every agent;
   a pulse runs from sender to receiver on each message, and the route stays
   lit for a few seconds. Each node shows the status, the terminal code and
-  how many messages it sent and received.
+  how many messages it sent and received; rest the pointer on the counts for
+  the last messages that node took part in. Only real sends are drawn: if the
+  feed is missing, failed or stale the tab says so (with RETRY) instead of
+  simulating traffic.
 - **Files panel**: a lazy file tree of the focused pane's folder, with git
   status marks and a read-only preview.
 - **Files**, **Metrics** and **Flow** buttons in the tab bar open the side panel. Each
@@ -59,7 +62,7 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 - A **play/pause** button beside the tabs cycles SESSION, LAST TURN and COST every 8 s; a click on a
   tab while it plays shows that tab for a full turn of the timer.
-- A **SCOPE** row under the account names picks the agents shown: **SPACE** (the shown space, the
+- A **SCOPE** row under the account names picks the agents shown, in both the Metrics and the Flow tabs (one shared switch, the Flow tab has its own row of buttons): **SPACE** (the shown space, the
   default), **PROJECT** (every agent, in any space, whose folder is the focused terminal's)
   or **ALL**.
 - Nothing reads zero until the collector has answered once: the numbers show `…`, cards say
@@ -68,6 +71,19 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
   refresh (5 s) retries by itself.
 - The side panel is remembered per space; a space that never had a choice starts with the
   last one made anywhere, instead of closed.
+
+## Headline, hover cards and details
+
+- A one-line **headline** tops the summary box: `READING…`, `READ FAILED`, `NO AGENTS`,
+  `N WORKING` or `ALL IDLE`; the blinking `NEEDS YOU` and `WAITING` chips sit beside it.
+- Rest the pointer on a figure for 250 ms for a **hover card**: the big figure lists tokens
+  (or cost) by agent; `AGENTS` the state of each; `CACHE` and `CTX MAX` the figure per agent;
+  `PLUGINS`, `MCP` and `HOOKS` the names.
+- Click an agent's **name** (Metrics card or Flow node) for its **detail dialog**: model,
+  account, folder, session, context and base, cache hit, turns left, session and last-turn
+  tokens, turns, tool calls, last tool, start and last activity, and what is configured.
+  Buttons: **ASK STATUS** (types a short status request into the agent), `/COMPACT`,
+  **OPEN TERMINAL**, **CLOSE** (Esc too).
 
 ## What the numbers mean
 
@@ -154,7 +170,9 @@ rebuild the layout from scratch.
 
 ## Tests
 
-`node --test tests/model.test.mjs` covers `mods/agent-metrics/model.js` (the pure logic: formatting,
-window, cost, turns left, pairing terminals with sessions). `node scripts/test-cost.mjs` checks the cost
+`node --test tests/model.test.mjs tests/flow.test.mjs` covers `mods/agent-metrics/model.js` (formatting,
+window, cost, turns left, pairing terminals with sessions, the detail dialog's rows), `scope.js`, and the
+Flow tab's `feed.js` and `flow.js` (feed state, replies, orchestrator, geometry); it also checks that the
+copies of `avatar.js` and `scope.js` stay identical. `node scripts/test-cost.mjs` checks the cost
 math against Claude Code's `/usage` and the collector's cache-write split. Check a mod with
 `herdr-app check <mod folder>`; `node --check` misses QuickJS-only errors.

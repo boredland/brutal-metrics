@@ -1,85 +1,29 @@
-// Where the Flow tab's message events come from. Every event has the collector's contract shape
-// (collect.py `events[]`: id, seq, ts, from, from_name, to, to_session, kind, summary), with `to`
-// already resolved to an hc address.
-//   MODE "shared": agent-metrics publishes the collector's window, `to` resolved by its match(),
-//                  in shared state KEY as { ok, at, orchestrator, events }. This mod never runs collect.py.
-//                  While that feed is missing, failed (ok false) or stale (no write for STALE_MS), the
-//                  tab falls back to the mock below.
-//   MODE "mock":   simulated sends between the space's real agents, always.
-import { shared } from "herdr";
+// Where the Flow tab's message events come from: agent-metrics publishes the collector's window, `to` resolved
+// by its match(), in shared state KEY as { ok, at, orchestrator, events, error? }. This mod never runs collect.py.
+// There is no simulated fallback: while the feed is missing, failed or stale the tab says so, and draws no sends.
+// Every event has the collector's contract shape (collect.py `events[]`: id, seq, ts, from, from_name, to,
+// to_session, kind, summary), with `to` already resolved to an hc address.
+import { shared, setShared } from "herdr";
+import { feedState, withKinds, roleOf, pickOrchestrator } from "./feed.js";
 
-export const MODE = "shared";
-const STALE_MS = 40000;
 export const KEY = "flow.events";
-const WINDOW = 50, SUMMARY = 60;
+// Asks agent-metrics to read again now (its RETRY button, and the Flow tab's).
+export const RETRY_KEY = "metrics.retry";
 
-const SAMPLES = [
-  "TAREFA: revisar o contrato da aba Flow",
-  "OK, pode implementar os itens 1 a 6",
-  "check passou, sync feito, errors vazio",
-  "contrato em flow-contract.md",
-  "aguardo OK do Chief of Staff",
-  "preciso de uma decisao sobre o rainbow",
-  "collect.py validado contra transcripts",
-  "rodar herdr-app check em agent-flow",
-  "feito: botao Flow no tab bar",
-  "nao edite collect.py ate eu avisar",
-];
+export { withKinds, roleOf };
 
-let seq = 0;
-const log = [];
-const pick = (xs) => xs[Math.floor(Math.random() * xs.length)];
+// { state: "reading" | "down" | "stale" | "live", error, at }
+export const status = () => feedState(shared(KEY), Date.now());
+// True when the events are fresh.
+export const live = () => status().state === "live";
 
-// One simulated send between `addresses`: mostly to or from the orchestrator, sometimes agent to agent.
-export function mockTick(addresses, orchestrator) {
-  const others = addresses.filter((a) => a !== orchestrator);
-  if (!orchestrator || others.length === 0) return null;
-  const r = Math.random();
-  let from, to;
-  if (r < 0.45 || others.length < 2) { from = orchestrator; to = pick(others); }
-  else if (r < 0.8) { from = pick(others); to = orchestrator; }
-  else { from = pick(others); to = pick(others.filter((a) => a !== from)); }
-  if (r >= 0.45 && r < 0.8 && others.length < 2) [from, to] = [to, from];
-  seq++;
-  const ev = { id: `mock:${seq}`, seq, ts: Date.now(), from, from_name: null, to, to_session: null, kind: "send", summary: pick(SAMPLES).slice(0, SUMMARY) };
-  log.push(ev);
-  if (log.length > WINDOW) log.shift();
-  return ev;
-}
-
-// The live feed, or null (mock mode, not published yet, collector failed, or stale).
-function feed() {
-  if (MODE !== "shared") return null;
-  const s = shared(KEY);
-  return s && s.ok && Array.isArray(s.events) && Date.now() - (s.at ?? 0) < STALE_MS ? s : null;
-}
-// True when the events are real (else they are simulated).
-export const live = () => feed() !== null;
-
-// The current window of events, oldest first, only those whose receiver is known.
+// The last published window, oldest first, only sends whose receiver is known. A stale window is still shown
+// (nothing new is drawn from it); a missing or failed one is empty.
 export function events() {
-  const s = feed();
-  return s ? s.events.filter((e) => e && e.from && e.to) : log;
+  const s = shared(KEY);
+  return s && Array.isArray(s.events) ? s.events.filter((e) => e && e.from && e.to) : [];
 }
 
-// `reply` = a send A to B after an earlier B to A in the window (the collector only emits `send`).
-export function withKinds(evs) {
-  const seen = new Set();
-  return evs.map((e) => {
-    const kind = e.kind === "send" && seen.has(`${e.to}>${e.from}`) ? "reply" : e.kind;
-    seen.add(`${e.from}>${e.to}`);
-    return kind === e.kind ? e : { ...e, kind };
-  });
-}
+export const orchestratorOf = (nodes) => pickOrchestrator(nodes, shared(KEY)?.orchestrator);
 
-export const roleOf = (labels) => (Array.isArray(labels) ? labels.find((l) => /^role=/.test(l))?.slice(5) : labels?.role);
-
-// The orchestrator: a published value, else the terminal labelled role=orchestrator
-// (`hc label t24 role=orchestrator`), else the first node.
-export function orchestratorOf(nodes) {
-  const addrs = new Set(nodes.map((n) => n.address));
-  const pub = live() ? feed().orchestrator : null;
-  if (pub && addrs.has(pub)) return pub;
-  const labeled = nodes.find((n) => roleOf(n.labels) === "orchestrator");
-  return labeled?.address ?? nodes[0]?.address ?? null;
-}
+export const retry = () => setShared(RETRY_KEY, Date.now());

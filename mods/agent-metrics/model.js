@@ -141,3 +141,48 @@ export function matchSessions(sessions, list, { created, titleOf, folderOf, kind
   }
   return out;
 }
+
+// What the detail dialog shows about one session: a plain, JSON-safe snapshot (it travels through shared
+// state, from the Metrics tab that owns the collector to the dialog, which runs in its own view).
+export function detailOf(s) {
+  if (!s) return null;
+  const win = winOf(s), used = s.in + s.cache_read + s.cache_write;
+  const t = turnOf(s);
+  return {
+    kind: s.agent ?? "claude", model: s.model ?? null, account: acctName(s.account), cwd: s.cwd ?? null,
+    session: s.session ?? null, title: s.title ?? null, started: s.started ?? null, mtime: s.mtime ?? null,
+    ctx: s.ctx ?? 0, win, base: Math.min(s.base ?? 0, s.ctx ?? 0),
+    cachePct: Math.round((s.cache_read / Math.max(1, used)) * 100), left: turnsLeft(s),
+    tokens: { in: s.in, out: s.out, cw: s.cache_write, cr: s.cache_read },
+    turn: { in: t.in, out: t.out, cw: t.cache_write, cr: t.cache_read },
+    turns: s.turns ?? 0, tools: s.tools ?? 0, tool: s.tool ?? null,
+    planUsed: s.agent === "codex" && s.plan?.used != null ? Math.round(s.plan.used) : null,
+    config: { plugins: s.config?.plugins ?? [], mcp: s.config?.mcp ?? [], hooks: s.config?.hooks ?? [] },
+  };
+}
+
+// The dialog's label/value rows for a detailOf() snapshot. `now` (ms) is passed in so it stays pure.
+export function detailRows(d, now) {
+  if (!d) return [];
+  const tok = (x) => fmt((x?.in ?? 0) + (x?.out ?? 0) + (x?.cw ?? 0));
+  const rows = [
+    ["MODEL", d.model ?? "—"],
+    ["ACCOUNT", d.account ?? "?"],
+    ["FOLDER", d.cwd ?? "—"],
+    ["SESSION", d.session ? d.session.slice(0, 8) : "—"],
+    ["CONTEXT", `${fmt(d.ctx)} / ${fmt(d.win)} (${Math.round((d.ctx / d.win) * 100)}%)`],
+    ["BASE", `${fmt(d.base)} (system prompt, tools, rules, MCP)`],
+    ["CACHE HIT", `${d.cachePct}%`],
+    ["TURNS LEFT", d.left === null ? "—" : `~${d.left > 99 ? "99+" : d.left}`],
+    ["TOKENS · SESSION", tok(d.tokens)],
+    ["TOKENS · LAST TURN", tok(d.turn)],
+    ["TURNS", String(d.turns)],
+    ["TOOL CALLS", String(d.tools)],
+    ["LAST TOOL", d.tool ?? "—"],
+    ["STARTED", d.started ? `${age(now - d.started)} ago` : "—"],
+    ["LAST ACTIVITY", d.mtime ? age(now - d.mtime) : "—"],
+    ["CONFIGURED", `${d.config.plugins.length} plugins · ${d.config.mcp.length} MCP · ${d.config.hooks.length} hooks`],
+  ];
+  if (d.planUsed !== null) rows.splice(8, 0, ["PLAN USED", `${d.planUsed}%`]);
+  return rows;
+}
