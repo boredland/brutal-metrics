@@ -1,20 +1,21 @@
 # Brutal Metrics
 
-A [Herdr](https://herdr.dev) layout with a brutalist cost panel. It shows
-what each Claude Code or Codex agent in a space spends in dollars (Claude) or
-plan use (Codex) and tokens, and how full its context window is.
+A [Herdr](https://herdr.dev) layout with a brutalist metrics panel. It shows
+what each Claude Code or Codex agent in a space is doing: tokens, cache, plan
+use (Codex), and how full its context window is. No financial cost is shown.
 
 ![Brutal Metrics](preview.png)
 
 ## Features
 
 - **Summary box** at the top of the panel, in compact cells (value over label):
-  - the estimated cost of the space, with **LAST TURN** and **TOTAL COST** tabs, and the account each session
+  - the tokens of the space, with **SESSION** and **LAST TURN** tabs, and the account each session
     runs as;
-  - `AGENTS`, `TOKENS` and `CACHE` (cache reads as a share of all input
+  - `AGENTS` and `PLUGINS` counts, big, beside the token count;
+  - `CACHE` (cache reads as a share of all input
     tokens), all summed over the space;
   - `CTX MAX`, the fullest context window among the agents (tinted from 80%);
-  - `PLUGINS`, `MCP` and `HOOKS`, the configured items across the agents.
+  - `MCP` and `HOOKS`, the configured items across the agents.
 - **One card per agent**, with sub-agents nested under it:
   - a `CLAUDE` or `CODEX` tag;
   - a thin 24-segment context bar split into base (system prompt, tools,
@@ -57,15 +58,15 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 ## What the numbers mean
 
-- Two tabs at the top of the box switch the numbers: **LAST TURN** (the
-  default) or **TOTAL COST**. They change the big cost, `TOKENS` and `CACHE`,
-  and the cost and cache of every card.
+- Two tabs at the top of the box switch the numbers: **SESSION** (the
+  default) or **LAST TURN**. They change the big token count and `CACHE`,
+  and the tokens and cache of every card.
   - Last turn is everything since your last prompt, including the model calls
     and tool loops it triggered. An idle agent keeps showing its last turn,
     and a new prompt starts the count from zero.
   - Total is the whole session.
 - `CTX MAX` is the context size at the last turn.
-- `PLUGINS`, `MCP` and `HOOKS` count what is configured, not what is
+- `PLUGINS` (top), `MCP` and `HOOKS` count what is configured, not what is
   connected. They are read from the settings files, `.claude.json`,
   `.mcp.json` and the enabled plugins. claude.ai cloud connectors are not
   counted.
@@ -117,18 +118,10 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 ## Notes
 
-- Costs are what the tokens would cost on the **Anthropic API at list
-  price**, not what a Claude subscription bills you. They are token usage
-  times the `PRICES` table in `mods/agent-metrics/main.js`, which has one row
-  per model (id without its date suffix): input, output, cache read, and
-  cache write with the 5-minute and the 1-hour TTL, priced apart. Claude Haiku
-  5.5 requests whose prompt is over 100k tokens use its higher rate.
-- A model missing from the table is priced as its family's current model
-  (Opus, Sonnet, Haiku or Fable), and its cost shows with a `~`, as in `~$1.20`.
-  Add a row to price it exactly.
-- Codex on a ChatGPT plan has no per-token price. Its card shows the share of
-  the plan's rate limit used instead of dollars, and it adds nothing to the
-  dollar total.
+- Financial cost is deliberately not shown: it can't be computed accurately from the
+  transcripts. Tokens are input + output + cache writes.
+- Codex on a ChatGPT plan: its card shows the share of the plan's rate limit used
+  in place of the token figure.
 - A terminal is paired only with a session of its own kind: Claude with
   Claude, Codex with Codex. The kind comes from what the agent reports to Herdr.
 - The panel shows each session's login email. Keep that in mind before you
