@@ -12,6 +12,7 @@ const FLOW_KEY = "flow.events", FLOW_HEARTBEAT_MS = 15000;
 
 const DISTRO = "Ubuntu";
 const REFRESH_MS = 5000;
+const AUTO_MS = 8000; // play: how long each tab stays before the next
 // Herdr stops an exec after 30s unless told otherwise, and a first read of many long transcripts can pass that.
 const COLLECT_MS = 120000;
 const STUCK_MS = COLLECT_MS + 15000; // a collector run older than this is treated as hung
@@ -45,10 +46,18 @@ export default class AgentMetrics extends View {
     this.width = 300;
     this.busy = false;
     this.tick = 0; this.anim = false;
+    this.auto = false; this.autoAt = 0; // play/pause: rotate the tabs
     this.scope = "space"; // which agents: "space" (the shown one), "project" (the focused folder, any space), "all"
     this.view = "total"; // "total" = whole session (default), "turn" = last turn, "cost" = session cost
     // Avatars step through their poses only while some agent is active (each tick redraws the window).
     cx.timer.every(200, (cx) => { if (this.anim) { this.tick++; cx.notify(); } });
+    cx.timer.every(1000, (cx) => {
+      if (!this.auto || Date.now() - this.autoAt < AUTO_MS) return;
+      const order = ["total", "turn", "cost"];
+      this.view = order[(order.indexOf(this.view) + 1) % order.length];
+      this.autoAt = Date.now();
+      cx.notify();
+    });
     cx.timer.every(REFRESH_MS, (cx) => this.refresh(cx));
     this.refresh(cx);
   }
@@ -148,19 +157,15 @@ export default class AgentMetrics extends View {
             .text_size(10).font_family(MONO).font_black().border(2).border_color(fg)
             .bg(on ? fg : "#00000000").text_color(on ? bg : fg)
             .tooltip(k === "turn" ? "Tokens and cache since the last prompt" : k === "cost" ? "Estimated API-equivalent cost of the whole session" : "Tokens and cache of the whole session")
-            .on_click((_e, cx) => { cx.stop_propagation(); this.view = k; cx.notify(); })
+            .on_click((_e, cx) => { cx.stop_propagation(); this.view = k; this.autoAt = Date.now(); cx.notify(); })
             .child(label);
-        })))
-      .child(h_flex().px(10).pb(4).gap(6).items_center()
-        .child(div().flex_none().text_size(9).font_family(MONO).font_bold().text_color(fg).child("SCOPE"))
-        .children([["space", "SPACE", "Agents of the shown space"], ["project", "PROJECT", "Agents in the focused terminal's folder, in any space"], ["all", "ALL", "Every agent in every space"]].map(([k, label, tip]) => {
-          const on = this.scope === k;
-          return div().id(`scope-${k}`).flex_1().h(15).flex().items_center().justify_center().cursor_pointer()
-            .text_size(9).font_family(MONO).font_black().border(1).border_color(fg)
-            .bg(on ? fg : "#00000000").text_color(on ? bg : fg).tooltip(tip)
-            .on_click((_e, cx) => { cx.stop_propagation(); this.scope = k; cx.notify(); })
-            .child(label);
-        })))
+        }))
+        // Play/pause: cycles SESSION > LAST TURN > COST on a timer.
+        .child(div().id("view-auto").flex_none().w(22).h(18).flex().items_center().justify_center().cursor_pointer()
+          .border(2).border_color(fg).bg(this.auto ? fg : "#00000000").text_color(this.auto ? bg : fg)
+          .tooltip(this.auto ? "Pause: stop cycling the tabs" : `Play: cycle SESSION, LAST TURN and COST every ${AUTO_MS / 1000}s`)
+          .on_click((_e, cx) => { cx.stop_propagation(); this.auto = !this.auto; this.autoAt = Date.now(); cx.notify(); })
+          .child(svg(this.auto ? "mods/agent-metrics/pause.svg" : "mods/agent-metrics/play.svg").size(10))))
       // Headline row: tokens, with the agent and plugin counts big beside it.
       .child(h_flex().items_stretch()
         .child(v_flex().id("tokens-total").flex_1().min_w(0).px(10).justify_center()
@@ -181,7 +186,18 @@ export default class AgentMetrics extends View {
         .child(div().flex_none().text_size(10).font_family(MONO).font_bold().text_color(fg).child(accounts.length > 1 ? `${accounts.length} CONTAS` : (accounts[0]?.org ?? "CONTA").toUpperCase()))
         .child(v_flex().flex_1().min_w(0)
           .children((accounts.length ? accounts : [{ name: "?" }]).map((x) =>
-            div().truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(accounts.length > 1 ? `${x.name} ×${x.n}` : x.name))))));
+            div().truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(accounts.length > 1 ? `${x.name} ×${x.n}` : x.name)))))
+      .child(h_flex().border_t(2).border_color(fg).px(10).py(5).gap(6).items_center()
+        .child(div().flex_none().text_size(9).font_family(MONO).font_bold().text_color(fg).child("SCOPE"))
+        .children([["space", "SPACE", "Agents of the shown space"], ["project", "PROJECT", "Agents in the focused terminal's folder, in any space"], ["all", "ALL", "Every agent in every space"]].map(([k, label, tip]) => {
+          const on = this.scope === k;
+          return div().id(`scope-${k}`).flex_1().h(15).flex().items_center().justify_center().cursor_pointer()
+            .text_size(9).font_family(MONO).font_black().border(1).border_color(fg)
+            .bg(on ? fg : "#00000000").text_color(on ? bg : fg).tooltip(tip)
+            .on_click((_e, cx) => { cx.stop_propagation(); this.scope = k; cx.notify(); })
+            .child(label);
+        })))
+    );
   }
 
   render() {

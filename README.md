@@ -58,7 +58,9 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 ## Scope, loading and errors
 
-- A **SCOPE** row under the tabs picks the agents shown: **SPACE** (the shown space, the
+- A **play/pause** button beside the tabs cycles SESSION, LAST TURN and COST every 8 s; a click on a
+  tab while it plays shows that tab for a full turn of the timer.
+- A **SCOPE** row under the account names picks the agents shown: **SPACE** (the shown space, the
   default), **PROJECT** (every agent, in any space, whose folder is the focused terminal's)
   or **ALL**.
 - Nothing reads zero until the collector has answered once: the numbers show `…`, cards say
